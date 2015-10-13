@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+
+<!-- the terminology are borrowed from apache httpd mod_proxy -->
+<proxy>
+	<pass path="/" url="http://localhost:50000/" />
+	<pass path="/master/" url="http://localhost:50010/master/" />
+</proxy>

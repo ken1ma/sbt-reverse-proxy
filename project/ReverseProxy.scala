@@ -1,5 +1,7 @@
 import scala.xml.XML
 
+import scala.collection.mutable.Buffer
+
 import java.io._
 import java.net._
 import io.netty.bootstrap._
@@ -10,6 +12,9 @@ import io.netty.channel.socket.nio.NioServerSocketChannel
 import io.netty.buffer.{ByteBuf, Unpooled}
 import io.netty.handler.logging._
 
+/**
+ * This SBT task starts/stops a reverse proxy within the SBT process.
+ */
 object ReverseProxy {
 	var bossGroup: EventLoopGroup = null
 	var workerGroup: EventLoopGroup = null
@@ -49,7 +54,8 @@ object ReverseProxy {
 				if (ch.isActive)
 					ch.writeAndFlush(Unpooled.EMPTY_BUFFER).addListener(ChannelFutureListener.CLOSE)
 			}
-			class ProxyBackendHandler(inboundCh: Channel) extends ChannelInboundHandlerAdapter {
+
+			class Proxy2ServerHandler(inboundCh: Channel) extends ChannelInboundHandlerAdapter {
 				override def channelActive(ctx: ChannelHandlerContext) {
 					ctx.read
 					ctx.write(Unpooled.EMPTY_BUFFER)
@@ -72,14 +78,37 @@ object ReverseProxy {
 					closeOnFlush(ctx.channel)
 				}
 			}
-			class ProxyFrontendHandler extends ChannelInboundHandlerAdapter {
+
+			class Client2ProxyHandler extends ChannelInboundHandlerAdapter {
+				/**
+				 * In order to support persistent connections,
+				 * ( http://tools.ietf.org/html/rfc7230#section-6.3 ),
+				 * This handler is in one of the following states:
+				 * <ol>
+				 *   <li>Waiting for a request start line
+				 *   <li>Buffering request headers
+				 *   <li>Waiting for the end of a request body
+				 * </ol>
+				 */
+				object State extends Enumeration {
+					type State = Value
+					val WAIT_START_LINE, WAIT_HEADERS, WAIT_BODY = Value
+				}
+				import State._
+				class Request {
+					var state = WAIT_START_LINE
+					val startLine = Buffer[Byte]()
+					val headers = Buffer[Byte]()
+					var contentLength: Option[Int] = None // the request body exists only when CONTENT-LENGTH header exists
+				}
+
 				var proxyPass: ProxyPass = _
 				var outboundCh: Channel = _
 				override def channelActive(ctx: ChannelHandlerContext) {
 					ctx.channel.read // read the first chunk
 				}
 				override def channelRead(ctx: ChannelHandlerContext, msg: Object) {
-					def writeDest {
+					def sendToServer {
 						outboundCh.writeAndFlush(msg).addListener(new ChannelFutureListener {
 							override def operationComplete(future: ChannelFuture) {
 								if (future.isSuccess)
@@ -123,14 +152,14 @@ object ReverseProxy {
 								val b = new Bootstrap()
 										.group(ctx.channel.eventLoop)
 										.channel(ctx.channel.getClass)
-										.handler(new ProxyBackendHandler(ctx.channel))
+										.handler(new Proxy2ServerHandler(ctx.channel))
 										.option[java.lang.Boolean](ChannelOption.AUTO_READ, false)
 								val f = b.connect(destHost, destPort)
 								outboundCh = f.channel
 								f.addListener(new ChannelFutureListener {
 									override def operationComplete(future: ChannelFuture) {
 										if (future.isSuccess) {
-											writeDest
+											sendToServer
 											ctx.channel.read // read the first chunk
 
 										} else {
@@ -143,7 +172,7 @@ object ReverseProxy {
 						}
 
 					} else if (outboundCh.isActive)
-						writeDest
+						sendToServer
 				}
 				override def channelInactive(ctx: ChannelHandlerContext) {
 					if (outboundCh != null)
@@ -154,17 +183,19 @@ object ReverseProxy {
 					closeOnFlush(ctx.channel)
 				}
 			}
-			class ProxyInitializer extends ChannelInitializer[SocketChannel] {
+
+			class Client2ProxyInitializer extends ChannelInitializer[SocketChannel] {
 				override def initChannel(ch: SocketChannel) {
 					ch.pipeline().addLast(//new LoggingHandler(LogLevel.INFO),
-							new ProxyFrontendHandler)
+							new Client2ProxyHandler)
 				}
 			}
+
 			serverCh = new ServerBootstrap()
 					.group(bossGroup, workerGroup)
 					.channel(classOf[NioServerSocketChannel])
 					//.handler(new LoggingHandler(LogLevel.INFO))
-					.childHandler(new ProxyInitializer)
+					.childHandler(new Client2ProxyInitializer)
 					.childOption[java.lang.Boolean](ChannelOption.AUTO_READ, false)
 					.bind(serverPort).sync.channel
 
@@ -195,6 +226,7 @@ object ReverseProxy {
 			log.info("the proxy is not running")
 	}
 
+	/** @return the first non-null argument, or null if none of them results in non-null */
 	def firstNonNull(funcs: (() => Any)*): Any = {
 		funcs.foreach { func =>
 			try {

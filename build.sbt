@@ -1,4 +1,4 @@
-name := "advr.proxy"
+name := "sbt-reverse-proxy"
 
 scalaVersion in ThisBuild := "2.11.7"
 
